@@ -1,0 +1,15 @@
+# 依赖
+*.pyc
+__pycache__/
+.venv/
+venv/
+
+# 登录态（含真实 cookie，绝对不要提交）
+.secrets/*
+!.secrets/.gitkeep
+*.json.gz
+storage_state*.json
+
+# 采集产物
+out/
+*.log

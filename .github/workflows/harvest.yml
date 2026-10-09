@@ -1,0 +1,153 @@
+name: 采集博主作品
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile_url:
+        description: '博主主页链接（抖音或小红书）'
+        required: true
+        type: string
+      enable_asr:
+        description: '是否转写视频口播（关闭会快很多）'
+        required: false
+        default: 'true'
+        type: boolean
+      limit:
+        description: '只处理前 N 条（0 = 全部），建议首次试跑填 5'
+        required: false
+        default: '0'
+        type: string
+      skip_detail:
+        description: '跳过详情页补全（更快，但文案质量下降）'
+        required: false
+        default: 'false'
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: harvest-${{ github.event.inputs.profile_url }}
+  cancel-in-progress: false
+
+jobs:
+  harvest:
+    runs-on: ubuntu-latest
+    # 公开仓库分钟数无限；私有仓库每月免费 2000 分钟
+    timeout-minutes: 120
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          pip install -r requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: 安装 ffmpeg（语音转写需要）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: 还原登录态
+        env:
+          STATE_DOUYIN: ${{ secrets.STATE_DOUYIN }}
+          STATE_XIAOHONGSHU: ${{ secrets.STATE_XIAOHONGSHU }}
+        run: |
+          mkdir -p .secrets
+          if [ -n "$STATE_DOUYIN" ]; then
+            echo "$STATE_DOUYIN" > .secrets/state_douyin.json
+            echo "已载入抖音登录态"
+          fi
+          if [ -n "$STATE_XIAOHONGSHU" ]; then
+            echo "$STATE_XIAOHONGSHU" > .secrets/state_xiaohongshu.json
+            echo "已载入小红书登录态"
+          fi
+          if [ -z "$STATE_DOUYIN" ] && [ -z "$STATE_XIAOHONGSHU" ]; then
+            echo "::error::没有找到任何登录态。请先本地运行 scripts/login.py 并配置 STATE_DOUYIN 或 STATE_XIAOHONGSHU"
+            exit 1
+          fi
+
+      - name: 校验配置
+        env:
+          ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+          TENCENT_SECRET_ID: ${{ secrets.TENCENT_SECRET_ID }}
+          TENCENT_SECRET_KEY: ${{ secrets.TENCENT_SECRET_KEY }}
+          TENCENT_ASR_ENGINE_MODEL_ID: ${{ secrets.TENCENT_ASR_ENGINE_MODEL_ID }}
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_APP_TOKEN: ${{ secrets.FEISHU_APP_TOKEN }}
+          FEISHU_TABLE_ID: ${{ secrets.FEISHU_TABLE_ID }}
+        run: |
+          missing=""
+          [ -z "$ZHIPU_API_KEY" ] && missing="$missing ZHIPU_API_KEY"
+          [ -z "$FEISHU_APP_TOKEN" ] && missing="$missing FEISHU_APP_TOKEN"
+          [ -z "$FEISHU_TABLE_ID" ] && missing="$missing FEISHU_TABLE_ID"
+          if [ "${{ inputs.enable_asr }}" = "true" ]; then
+            [ -z "$TENCENT_SECRET_ID" ] && missing="$missing TENCENT_SECRET_ID"
+            [ -z "$TENCENT_SECRET_KEY" ] && missing="$missing TENCENT_SECRET_KEY"
+          fi
+          if [ -n "$missing" ]; then
+            echo "::error::缺少必要的 Secret：$missing"
+            exit 1
+          fi
+          echo "配置校验通过"
+
+      - name: 执行采集
+        env:
+          ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+          TENCENT_SECRET_ID: ${{ secrets.TENCENT_SECRET_ID }}
+          TENCENT_SECRET_KEY: ${{ secrets.TENCENT_SECRET_KEY }}
+          TENCENT_ASR_ENGINE_MODEL_ID: ${{ secrets.TENCENT_ASR_ENGINE_MODEL_ID }}
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_APP_TOKEN: ${{ secrets.FEISHU_APP_TOKEN }}
+          FEISHU_TABLE_ID: ${{ secrets.FEISHU_TABLE_ID }}
+          ASR_ENABLED: ${{ inputs.enable_asr }}
+          PYTHONUNBUFFERED: '1'
+        run: |
+          ARGS="${{ inputs.profile_url }}"
+          [ "${{ inputs.enable_asr }}" != "true" ] && ARGS="$ARGS --no-asr"
+          [ "${{ inputs.skip_detail }}" = "true" ] && ARGS="$ARGS --no-detail"
+          [ "${{ inputs.limit }}" != "0" ] && ARGS="$ARGS --limit ${{ inputs.limit }}"
+          echo "执行：python main.py $ARGS"
+          python main.py $ARGS
+
+      - name: 汇总额度消耗
+        if: always()
+        run: |
+          if [ -f out/summary.json ]; then
+            echo "### 采集结果摘要" >> $GITHUB_STEP_SUMMARY
+            echo '```json' >> $GITHUB_STEP_SUMMARY
+            cat out/summary.json >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            # 额度超了就在页面顶部显式提醒
+            HOURS=$(python -c "import json;d=json.load(open('out/summary.json'));print(d.get('asr_quota',{}).get('consumed_hours',0))" 2>/dev/null || echo 0)
+            if python -c "import sys; sys.exit(0 if float('$HOURS') > 10 else 1)" 2>/dev/null; then
+              echo "::warning title=ASR 额度已超::本次转写消耗 ${HOURS} 小时，超过腾讯云每月 10 小时免费额度。超额会停服不扣费，表现为视频只有标题没有口播文案。"
+            elif [ "$HOURS" != "0" ]; then
+              echo "::notice title=ASR 额度充足::本次消耗 ${HOURS} 小时，腾讯云每月免费额度 10 小时"
+            fi
+          fi
+
+      - name: 上传采集结果
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: harvest-result
+          path: out/
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: 失败时上传登录态提示
+        if: failure()
+        run: |
+          echo "::error title=采集失败::常见原因：登录态过期（每 2-4 周需重新运行 scripts/login.py）、触发风控验证、或飞书字段名不匹配"
+          echo "采集结果已作为 artifact 上传，可下载后手动导入飞书"
