@@ -3,10 +3,25 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import random
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
+
+
+def _normalize_state(data: Any) -> Any:
+    """登录态支持两种来源：
+
+    1. Playwright `storage_state` 格式（dict，含 cookies + origins）——由 login.py 生成。
+    2. 纯 cookie 数组（list）——可由浏览器扩展（如 Cookie-Editor）导出，免装 Python。
+
+    第二种会被包成 {cookies, origins:[]}。注意：纯 cookie 不含 localStorage，
+    少数平台可能因此登录态不完整，遇到再补。
+    """
+    if isinstance(data, list):
+        return {"cookies": data, "origins": []}
+    return data
 
 from playwright.async_api import async_playwright, BrowserContext, Page
 
@@ -164,6 +179,14 @@ async def launch_context(headless: bool = True) -> tuple[Any, BrowserContext]:
         project_root / ".secrets" / "state_xiaohongshu.json",
     ]
     existing = next((p for p in state_files if p.is_file()), None)
+    state_data: Any = None
+    if existing:
+        try:
+            raw = json.loads(existing.read_text(encoding="utf-8"))
+            state_data = _normalize_state(raw)
+        except Exception as exc:
+            print(f"[WARN] 登录态文件解析失败，将以游客身份运行：{exc}")
+            state_data = None
 
     playwright = await async_playwright().start()
     browser = await playwright.chromium.launch(
@@ -179,7 +202,7 @@ async def launch_context(headless: bool = True) -> tuple[Any, BrowserContext]:
         viewport={"width": 1440, "height": 900},
         locale="zh-CN",
         timezone_id="Asia/Shanghai",
-        storage_state=str(existing) if existing else None,
+        storage_state=state_data,
     )
 
     # 抹掉最容易被检测的自动化标记
