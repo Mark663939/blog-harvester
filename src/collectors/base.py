@@ -16,11 +16,34 @@ def _normalize_state(data: Any) -> Any:
     1. Playwright `storage_state` 格式（dict，含 cookies + origins）——由 login.py 生成。
     2. 纯 cookie 数组（list）——可由浏览器扩展（如 Cookie-Editor）导出，免装 Python。
 
-    第二种会被包成 {cookies, origins:[]}。注意：纯 cookie 不含 localStorage，
+    第二种会被包成 {cookies, origins:[]}，并顺手把 Cookie-Editor 导出时
+    那些 Playwright 不认的字段/取值归一化（比如 sameSite=no_restriction→None、
+    把 expirationDate 转成 expires）。注意：纯 cookie 不含 localStorage，
     少数平台可能因此登录态不完整，遇到再补。
     """
     if isinstance(data, list):
-        return {"cookies": data, "origins": []}
+        cookies: list[dict[str, Any]] = []
+        for raw in data:
+            if not isinstance(raw, dict):
+                continue
+            cookie: dict[str, Any] = {
+                "name": raw.get("name"),
+                "value": raw.get("value"),
+                "domain": raw.get("domain"),
+                "path": raw.get("path", "/"),
+                "secure": bool(raw.get("secure", False)),
+                "httpOnly": bool(raw.get("httpOnly", False)),
+            }
+            exp = raw.get("expirationDate") or raw.get("expires")
+            if exp:
+                cookie["expires"] = exp
+            ss = raw.get("sameSite")
+            if ss in ("Strict", "Lax", "None"):
+                cookie["sameSite"] = ss
+            elif ss in ("no_restriction", "unspecified", ""):
+                cookie["sameSite"] = "None"
+            cookies.append(cookie)
+        return {"cookies": cookies, "origins": []}
     return data
 
 from playwright.async_api import async_playwright, BrowserContext, Page
