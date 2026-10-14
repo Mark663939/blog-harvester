@@ -55,8 +55,16 @@ class TencentASR:
         )
 
         def _call() -> str:
-            client = asr_client.AsrClient(self.settings.tencent_secret_id, self.settings.tencent_secret_key)
-            client.region = "ap-shanghai"
+            from tencentcloud.common import credential
+            from tencentcloud.common.profile import client_profile, http_profile
+
+            cred = credential.Credential(
+                self.settings.tencent_secret_id, self.settings.tencent_secret_key
+            )
+            http_profile_obj = http_profile.HttpProfile()
+            client_profile_obj = client_profile.ClientProfile()
+            client = asr_client.AsrClient(cred, "ap-shanghai", client_profile_obj)
+
             request = models.CreateRecTaskRequest()
             request.EngineModelType = engine_model_type
             request.ChannelNum = _CHANNEL_NUM
